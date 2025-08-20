@@ -1,140 +1,98 @@
-import axios from "axios";
+import API_CONFIG from "../config/api";
 
-// API Configuration
-const API_BASE_URL =
-  import.meta.env.VITE_API_URL || "http://localhost:8080/api";
-
-// Create axios instance
-const apiClient = axios.create({
-  baseURL: API_BASE_URL,
-  timeout: 10000,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
-
-// Request interceptor to add auth token
-apiClient.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem("authToken");
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
-  },
-);
-
-// Response interceptor for error handling
-apiClient.interceptors.response.use(
-  (response) => {
-    return response;
-  },
-  (error) => {
-    if (error.response?.status === 401) {
-      // Token expired or invalid
-      localStorage.removeItem("authToken");
-      localStorage.removeItem("userRole");
-      window.location.href = "/login";
-    }
-    return Promise.reject(error);
-  },
-);
-
-// API Types
-export interface LoginRequest {
+export type LoginRequest = {
   email: string;
   password: string;
-  role: "admin" | "citizen";
-}
+  role?: "admin" | "citizen";
+};
 
-export interface LoginResponse {
+export type User = {
+  id?: string;
+  name?: string;
+  email?: string;
+  role?: string;
+};
+
+export type LoginResponse = {
   token: string;
-  user: {
-    id: string;
-    email: string;
-    role: "admin" | "citizen";
-    name: string;
-  };
-}
+  user: User;
+};
 
-export interface Report {
-  id: string;
-  citizenName: string;
-  citizenEmail: string;
-  location: string;
-  coordinates?: {
-    lat: number;
-    lng: number;
-  };
-  description: string;
-  status: "pending" | "approved" | "rejected";
-  priority: "low" | "medium" | "high";
-  createdAt: string;
-  updatedAt: string;
-  imageUrl?: string;
-  attachments?: string[];
-}
+async function request<T>(
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+  path: string,
+  body?: any,
+  opts?: { withCredentials?: boolean; headers?: Record<string, string> }
+): Promise<T> {
+  const base = API_CONFIG.BASE_URL.replace(/\/$/, "");
+  const p = path.startsWith("/") ? path : `/${path}`;
+  const url = `${base}${p}`;
 
-export interface CreateReportRequest {
-  location: string;
-  coordinates?: {
-    lat: number;
-    lng: number;
+  const headers: Record<string, string> = {
+    ...API_CONFIG.DEFAULT_HEADERS,
+    ...(opts?.headers || {}),
   };
-  description: string;
-  priority: "low" | "medium" | "high";
-  images?: File[];
-}
 
-export interface Encroachment {
-  id: string;
-  location: string;
-  coordinates: {
-    lat: number;
-    lng: number;
-  };
-  detectedAt: string;
-  confidence: number;
-  status: "new" | "verified" | "resolved" | "false_positive";
-  area: number; // in square meters
-  satelliteImageUrl?: string;
-  comparisonImageUrl?: string;
-}
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+    credentials: opts?.withCredentials ? "include" : "omit",
+  });
 
-export interface Alert {
-  id: string;
-  type: "encroachment_match" | "high_priority_report" | "system_alert";
-  title: string;
-  message: string;
-  severity: "low" | "medium" | "high" | "critical";
-  createdAt: string;
-  isRead: boolean;
-  reportId?: string;
-  encroachmentId?: string;
-  location?: string;
+  // read raw text first
+  const text = await res.text();
+  const contentType = res.headers.get("content-type") || "";
+
+  // attempt JSON parse only when response is JSON, otherwise keep text
+  let data: any = null;
+  if (text) {
+    if (contentType.includes("application/json")) {
+      try {
+        data = JSON.parse(text);
+      } catch (err) {
+        // malformed JSON — fallback to raw text
+        data = text;
+      }
+    } else {
+      data = text;
+    }
+  }
+
+  if (!res.ok) {
+    // prefer structured message fields, otherwise use raw text or statusText
+    const msg =
+      (data && (data.message || data.error)) || (typeof data === "string" ? data : null) || res.statusText;
+    throw new Error(msg?.toString() || `Request failed: ${res.status}`);
+  }
+
+  return data as T;
 }
 
 // Authentication API
 export const authAPI = {
   login: async (credentials: LoginRequest): Promise<LoginResponse> => {
-    const response = await apiClient.post("/auth/login", credentials);
-    return response.data;
+    return request<LoginResponse>(
+      "POST",
+      API_CONFIG.ENDPOINTS.AUTH.LOGIN,
+      credentials,
+      { withCredentials: false }
+    );
   },
 
   logout: async (): Promise<void> => {
-    await apiClient.post("/auth/logout");
-    localStorage.removeItem("authToken");
-    localStorage.removeItem("userRole");
+    await request<void>("POST", API_CONFIG.ENDPOINTS.AUTH.LOGOUT, undefined, {
+      withCredentials: true,
+    });
   },
 
   verifyToken: async (): Promise<boolean> => {
     try {
-      await apiClient.get("/auth/verify");
+      await request<any>("GET", API_CONFIG.ENDPOINTS.AUTH.VERIFY, undefined, {
+        withCredentials: true,
+      });
       return true;
-    } catch (error) {
+    } catch {
       return false;
     }
   },
@@ -142,76 +100,49 @@ export const authAPI = {
 
 // Reports API
 export const reportsAPI = {
-  getReports: async (): Promise<Report[]> => {
-    const response = await apiClient.get("/reports");
-    return response.data;
+  getReports: async (): Promise<any[]> => {
+    return request<any[]>("GET", API_CONFIG.ENDPOINTS.REPORTS.LIST);
   },
 
-  getReport: async (id: string): Promise<Report> => {
-    const response = await apiClient.get(`/reports/${id}`);
-    return response.data;
+  getReport: async (id: string): Promise<any> => {
+    return request<any>("GET", API_CONFIG.ENDPOINTS.REPORTS.GET(id));
   },
 
-  createReport: async (report: CreateReportRequest): Promise<Report> => {
-    const formData = new FormData();
-
-    // Add text fields
-    formData.append("location", report.location);
-    formData.append("description", report.description);
-    formData.append("priority", report.priority);
-
-    if (report.coordinates) {
-      formData.append("coordinates", JSON.stringify(report.coordinates));
-    }
-
-    // Add image files
-    if (report.images) {
-      report.images.forEach((image, index) => {
-        formData.append(`images`, image);
-      });
-    }
-
-    const response = await apiClient.post("/reports", formData, {
-      headers: {
-        "Content-Type": "multipart/form-data",
-      },
-    });
-    return response.data;
+  createReport: async (report: any): Promise<any> => {
+    return request<any>("POST", API_CONFIG.ENDPOINTS.REPORTS.CREATE, report);
   },
 
   updateReportStatus: async (
     id: string,
-    status: "approved" | "rejected",
-  ): Promise<Report> => {
-    const response = await apiClient.patch(`/reports/${id}/status`, { status });
-    return response.data;
+    status: "approved" | "rejected"
+  ): Promise<any> => {
+    return request<any>("PATCH", API_CONFIG.ENDPOINTS.REPORTS.UPDATE_STATUS(id), {
+      status,
+    });
   },
 
   deleteReport: async (id: string): Promise<void> => {
-    await apiClient.delete(`/reports/${id}`);
+    await request<void>("DELETE", API_CONFIG.ENDPOINTS.REPORTS.DELETE(id));
   },
 };
 
 // Encroachments API
 export const encroachmentAPI = {
-  getEncroachments: async (): Promise<Encroachment[]> => {
-    const response = await apiClient.get("/encroachments");
-    return response.data;
+  getEncroachments: async (): Promise<any[]> => {
+    return request<any[]>("GET", API_CONFIG.ENDPOINTS.ENCROACHMENTS.LIST);
   },
 
-  getEncroachment: async (id: string): Promise<Encroachment> => {
-    const response = await apiClient.get(`/encroachments/${id}`);
-    return response.data;
+  getEncroachment: async (id: string): Promise<any> => {
+    return request<any>("GET", API_CONFIG.ENDPOINTS.ENCROACHMENTS.GET(id));
   },
 
   updateEncroachmentStatus: async (
     id: string,
-    status: Encroachment["status"],
-  ): Promise<Encroachment> => {
-    const response = await apiClient.patch(`/encroachments/${id}/status`, {
+    status: string
+  ): Promise<any> => {
+    return request<any>("PATCH", API_CONFIG.ENDPOINTS.ENCROACHMENTS.UPDATE_STATUS(id), {
       status,
     });
-    return response.data;
   },
 
   getEncroachmentsByArea: async (bounds: {
@@ -219,79 +150,48 @@ export const encroachmentAPI = {
     south: number;
     east: number;
     west: number;
-  }): Promise<Encroachment[]> => {
-    const response = await apiClient.get("/encroachments/area", {
-      params: bounds,
-    });
-    return response.data;
+  }): Promise<any[]> => {
+    const query = new URLSearchParams({
+      north: String(bounds.north),
+      south: String(bounds.south),
+      east: String(bounds.east),
+      west: String(bounds.west),
+    }).toString();
+    return request<any[]>("GET", `${API_CONFIG.ENDPOINTS.ENCROACHMENTS.BY_AREA}?${query}`);
   },
 };
 
-// Alerts API
+// Alerts API (added)
 export const alertsAPI = {
-  getAlerts: async (): Promise<Alert[]> => {
-    const response = await apiClient.get("/alerts");
-    return response.data;
+  getAlerts: async (): Promise<any[]> => {
+    return request<any[]>("GET", API_CONFIG.ENDPOINTS.ALERTS.LIST);
   },
 
-  markAlertRead: async (id: string): Promise<void> => {
-    await apiClient.patch(`/alerts/${id}/read`);
+  markAlertRead: async (id: string): Promise<any> => {
+    return request<any>("PATCH", API_CONFIG.ENDPOINTS.ALERTS.MARK_READ(id));
   },
 
-  markAllAlertsRead: async (): Promise<void> => {
-    await apiClient.patch("/alerts/read-all");
+  markAllRead: async (): Promise<void> => {
+    await request<void>("PATCH", API_CONFIG.ENDPOINTS.ALERTS.MARK_ALL_READ);
   },
 
   getUnreadCount: async (): Promise<number> => {
-    const response = await apiClient.get("/alerts/unread-count");
-    return response.data.count;
+    const res = await request<{ count: number }>("GET", API_CONFIG.ENDPOINTS.ALERTS.UNREAD_COUNT);
+    return res?.count ?? 0;
   },
 };
 
-// Analytics API
+// Analytics API (added)
 export const analyticsAPI = {
-  getDashboardStats: async (): Promise<{
-    totalReports: number;
-    pendingReports: number;
-    approvedReports: number;
-    rejectedReports: number;
-    totalEncroachments: number;
-    newEncroachments: number;
-    resolvedEncroachments: number;
-    alertsCount: number;
-  }> => {
-    const response = await apiClient.get("/analytics/dashboard");
-    return response.data;
+  getDashboardStats: async (): Promise<any> => {
+    return request<any>("GET", API_CONFIG.ENDPOINTS.ANALYTICS.DASHBOARD);
   },
 
-  getReportsOverTime: async (
-    period: "7d" | "30d" | "90d" | "1y",
-  ): Promise<
-    {
-      date: string;
-      count: number;
-    }[]
-  > => {
-    const response = await apiClient.get(
-      `/analytics/reports/timeline?period=${period}`,
-    );
-    return response.data;
+  getReportsOverTime: async (): Promise<any> => {
+    return request<any>("GET", API_CONFIG.ENDPOINTS.ANALYTICS.REPORTS_TIMELINE);
   },
 
-  getEncroachmentsByRegion: async (): Promise<
-    {
-      region: string;
-      count: number;
-      coordinates: { lat: number; lng: number };
-    }[]
-  > => {
-    const response = await apiClient.get("/analytics/encroachments/regions");
-    return response.data;
+  getEncroachmentsByRegion: async (): Promise<any> => {
+    return request<any>("GET", API_CONFIG.ENDPOINTS.ANALYTICS.ENCROACHMENTS_REGIONS);
   },
 };
-
-// Export the configured axios instance for custom requests
-export { apiClient };
-
-// Export default instance
-export default apiClient;
