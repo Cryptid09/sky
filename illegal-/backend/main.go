@@ -37,6 +37,9 @@ func main() {
 		fmt.Fprintln(w, "✅ API is running and connected to PostgreSQL!")
 	}).Methods("GET")
 
+	// Serve uploaded files at /uploads/
+	r.PathPrefix("/uploads/").Handler(http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads/"))))
+
 	// Add CORS middleware and wrap the router
 	corsMiddleware := handlers.CORS(
 		handlers.AllowedOrigins([]string{"http://localhost:8081", "http://localhost:3000", "http://localhost:4173"}),

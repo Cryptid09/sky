@@ -1,57 +1,44 @@
 import API_CONFIG from "../config/api";
 
-export type LoginRequest = {
-  email: string;
-  password: string;
-  role?: "admin" | "citizen";
-};
-
-export type User = {
-  id?: string;
-  name?: string;
-  email?: string;
-  role?: string;
-};
-
-export type LoginResponse = {
-  token: string;
-  user: User;
-};
-
 async function request<T>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   body?: any,
-  opts?: { withCredentials?: boolean; headers?: Record<string, string> }
+  opts?: { withCredentials?: boolean; headers?: Record<string, string>; isFormData?: boolean }
 ): Promise<T> {
   const base = API_CONFIG.BASE_URL.replace(/\/$/, "");
   const p = path.startsWith("/") ? path : `/${path}`;
   const url = `${base}${p}`;
 
+  // start with default headers but allow override/omission
   const headers: Record<string, string> = {
-    ...API_CONFIG.DEFAULT_HEADERS,
+    ...(API_CONFIG.DEFAULT_HEADERS || {}),
     ...(opts?.headers || {}),
   };
+
+  const isForm = !!opts?.isFormData || body instanceof FormData;
+
+  // when sending FormData, do NOT set Content-Type (browser sets multipart boundary)
+  if (isForm) {
+    delete headers["Content-Type"];
+  }
 
   const res = await fetch(url, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    body: isForm ? body : body ? JSON.stringify(body) : undefined,
     credentials: opts?.withCredentials ? "include" : "omit",
   });
 
-  // read raw text first
   const text = await res.text();
   const contentType = res.headers.get("content-type") || "";
 
-  // attempt JSON parse only when response is JSON, otherwise keep text
   let data: any = null;
   if (text) {
     if (contentType.includes("application/json")) {
       try {
         data = JSON.parse(text);
-      } catch (err) {
-        // malformed JSON — fallback to raw text
+      } catch {
         data = text;
       }
     } else {
@@ -60,7 +47,6 @@ async function request<T>(
   }
 
   if (!res.ok) {
-    // prefer structured message fields, otherwise use raw text or statusText
     const msg =
       (data && (data.message || data.error)) || (typeof data === "string" ? data : null) || res.statusText;
     throw new Error(msg?.toString() || `Request failed: ${res.status}`);
@@ -108,8 +94,15 @@ export const reportsAPI = {
     return request<any>("GET", API_CONFIG.ENDPOINTS.REPORTS.GET(id));
   },
 
-  createReport: async (report: any): Promise<any> => {
-    return request<any>("POST", API_CONFIG.ENDPOINTS.REPORTS.CREATE, report);
+  // Accepts either FormData (with files appended as "images") or plain object (JSON)
+  createReport: async (report: FormData | Record<string, any>): Promise<any> => {
+    const isForm = report instanceof FormData;
+    return request<any>(
+      "POST",
+      API_CONFIG.ENDPOINTS.REPORTS.CREATE,
+      report,
+      { withCredentials: false, isFormData: isForm }
+    );
   },
 
   updateReportStatus: async (

@@ -2,6 +2,7 @@
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8080/api";
 
 const DEFAULT_HEADERS = {
+  Accept: "application/json",
   "Content-Type": "application/json",
 };
 
@@ -30,7 +31,6 @@ const ENDPOINTS = {
     MARK_ALL_READ: "/alerts/read-all",
     UNREAD_COUNT: "/alerts/unread-count",
   },
-
   ANALYTICS: {
     DASHBOARD: "/analytics/dashboard",
     REPORTS_TIMELINE: "/analytics/reports/timeline",

@@ -1,199 +1,170 @@
 package controllers
 
 import (
-    "encoding/json"
-    "net/http"
-    "fmt"
-    "backend/models"
-    "backend/utils"
-    "github.com/gorilla/mux"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"backend/models"
+	"backend/utils"
+
+	"github.com/gorilla/mux"
+	"gorm.io/datatypes"
 )
 
-type Report struct {
-    ID            string  `json:"id"`
-    CitizenName   string  `json:"citizenName"`
-    CitizenEmail  string  `json:"citizenEmail"`
-    Location      string  `json:"location"`
-    Coordinates   *struct {
-        Lat float64 `json:"lat"`
-        Lng float64 `json:"lng"`
-    } `json:"coordinates,omitempty"`
-    Description   string `json:"description"`
-    Status        string `json:"status"`
-    Priority      string `json:"priority"`
-    CreatedAt     string `json:"createdAt"`
-    UpdatedAt     string `json:"updatedAt"`
-    ImageUrl      string `json:"imageUrl,omitempty"`
-    Attachments   []string `json:"attachments,omitempty"`
-}
-
-type CreateReportRequest struct {
-    Location      string  `json:"location"`
-    Coordinates   *struct {
-        Lat float64 `json:"lat"`
-        Lng float64 `json:"lng"`
-    } `json:"coordinates,omitempty"`
-    Description   string `json:"description"`
-    Priority      string `json:"priority"`
-    Images        []string `json:"images,omitempty"`
-}
-
+// GetReports returns all reports
 func GetReports(w http.ResponseWriter, r *http.Request) {
-    var complaints []models.Complaint
-    if err := utils.DB.Find(&complaints).Error; err != nil {
-        http.Error(w, "Failed to fetch reports", http.StatusInternalServerError)
-        return
-    }
-
-    // Convert complaints to reports format
-    var reports []Report
-    for _, complaint := range complaints {
-        report := Report{
-            ID:           fmt.Sprintf("%d", complaint.ID),
-            CitizenName:  complaint.CitizenName,
-            CitizenEmail: complaint.CitizenEmail,
-            Location:     complaint.Location,
-            Description:  complaint.Description,
-            Status:       complaint.Status,
-            Priority:     "medium", // Default priority
-            CreatedAt:    complaint.CreatedAt.Format("2006-01-02T15:04:05Z"),
-            UpdatedAt:    complaint.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-        }
-        reports = append(reports, report)
-    }
-
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(reports)
+	var reports []models.Report
+	if err := utils.DB.Order("created_at desc").Find(&reports).Error; err != nil {
+		http.Error(w, "failed to fetch reports", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(reports)
 }
 
+// GetReport returns a single report by id
 func GetReport(w http.ResponseWriter, r *http.Request) {
-    vars := mux.Vars(r)
-    id := vars["id"]
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
 
-    var complaint models.Complaint
-    if err := utils.DB.First(&complaint, id).Error; err != nil {
-        http.Error(w, "Report not found", http.StatusNotFound)
-        return
-    }
-
-    report := Report{
-        ID:           fmt.Sprintf("%d", complaint.ID),
-        CitizenName:  complaint.CitizenName,
-        CitizenEmail: complaint.CitizenEmail,
-        Location:     complaint.Location,
-        Description:  complaint.Description,
-        Status:       complaint.Status,
-        Priority:     "medium",
-        CreatedAt:    complaint.CreatedAt.Format("2006-01-02T15:04:05Z"),
-        UpdatedAt:    complaint.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-    }
-
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(report)
+	var report models.Report
+	if err := utils.DB.First(&report, id).Error; err != nil {
+		http.Error(w, "report not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(report)
 }
 
+// CreateReport handles multipart/form-data report creation and saves image files to ./uploads
 func CreateReport(w http.ResponseWriter, r *http.Request) {
-    // Parse multipart form
-    if err := r.ParseMultipartForm(32 << 20); err != nil {
-        http.Error(w, "Failed to parse form", http.StatusBadRequest)
-        return
-    }
+	// limit parsing size (e.g. 32MB)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "failed to parse form", http.StatusBadRequest)
+		return
+	}
 
-    // Extract form data
-    location := r.FormValue("location")
-    description := r.FormValue("description")
-    priority := r.FormValue("priority")
+	location := r.FormValue("location")
+	description := r.FormValue("description")
+	priority := r.FormValue("priority")
+	coordStr := r.FormValue("coordinates") // optional JSON string
 
-    if location == "" || description == "" {
-        http.Error(w, "Location and description are required", http.StatusBadRequest)
-        return
-    }
+	// collect image URLs
+	imageURLs := []string{}
+	uploadsDir := "uploads"
+	_ = os.MkdirAll(uploadsDir, 0755)
 
-    // Create complaint (using existing model)
-    complaint := models.Complaint{
-        CitizenName:  "Anonymous", // Default value
-        CitizenEmail: "anonymous@example.com", // Default value
-        Location:     location,
-        Description:  description,
-        Status:       "pending",
-    }
+	if r.MultipartForm != nil && r.MultipartForm.File != nil {
+		files := r.MultipartForm.File["images"]
+		for _, fh := range files {
+			src, err := fh.Open()
+			if err != nil {
+				continue
+			}
+			defer src.Close()
 
-    if err := utils.DB.Create(&complaint).Error; err != nil {
-        http.Error(w, "Failed to create report", http.StatusInternalServerError)
-        return
-    }
+			// create unique filename
+			name := fmt.Sprintf("%d_%s", time.Now().UnixNano(), filepath.Base(fh.Filename))
+			dstPath := filepath.Join(uploadsDir, name)
+			dst, err := os.Create(dstPath)
+			if err != nil {
+				continue
+			}
+			_, _ = io.Copy(dst, src)
+			_ = dst.Close()
 
-    // Convert to report format for response
-    report := Report{
-        ID:           fmt.Sprintf("%d", complaint.ID),
-        CitizenName:  complaint.CitizenName,
-        CitizenEmail: complaint.CitizenEmail,
-        Location:     complaint.Location,
-        Description:  complaint.Description,
-        Status:       complaint.Status,
-        Priority:     priority,
-        CreatedAt:    complaint.CreatedAt.Format("2006-01-02T15:04:05Z"),
-        UpdatedAt:    complaint.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-    }
+			// store URL relative to server root
+			imageURLs = append(imageURLs, "/uploads/"+name)
+		}
+	}
 
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusCreated)
-    json.NewEncoder(w).Encode(report)
+	coordsJSON := datatypes.JSON([]byte("null"))
+	if coordStr != "" {
+		coordsJSON = datatypes.JSON([]byte(coordStr))
+	}
+
+	imagesJSON, _ := json.Marshal(imageURLs)
+
+	report := models.Report{
+		Location:    location,
+		Description: description,
+		Priority:    priority,
+		Coordinates: coordsJSON,
+		Images:      datatypes.JSON(imagesJSON),
+		Status:      "pending",
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+
+	if err := utils.DB.Create(&report).Error; err != nil {
+		http.Error(w, "failed to create report", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(report)
 }
 
+// UpdateReportStatus updates status field of a report
 func UpdateReportStatus(w http.ResponseWriter, r *http.Request) {
-    vars := mux.Vars(r)
-    id := vars["id"]
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
 
-    var statusUpdate struct {
-        Status string `json:"status"`
-    }
-    if err := json.NewDecoder(r.Body).Decode(&statusUpdate); err != nil {
-        http.Error(w, "Invalid request body", http.StatusBadRequest)
-        return
-    }
+	var payload struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
 
-    if statusUpdate.Status != "approved" && statusUpdate.Status != "rejected" {
-        http.Error(w, "Invalid status", http.StatusBadRequest)
-        return
-    }
+	var report models.Report
+	if err := utils.DB.First(&report, id).Error; err != nil {
+		http.Error(w, "report not found", http.StatusNotFound)
+		return
+	}
 
-    var complaint models.Complaint
-    if err := utils.DB.First(&complaint, id).Error; err != nil {
-        http.Error(w, "Report not found", http.StatusNotFound)
-        return
-    }
+	report.Status = payload.Status
+	report.UpdatedAt = time.Now()
+	if err := utils.DB.Save(&report).Error; err != nil {
+		http.Error(w, "failed to update report", http.StatusInternalServerError)
+		return
+	}
 
-    complaint.Status = statusUpdate.Status
-    if err := utils.DB.Save(&complaint).Error; err != nil {
-        http.Error(w, "Failed to update status", http.StatusInternalServerError)
-        return
-    }
-
-    report := Report{
-        ID:           fmt.Sprintf("%d", complaint.ID),
-        CitizenName:  complaint.CitizenName,
-        CitizenEmail: complaint.CitizenEmail,
-        Location:     complaint.Location,
-        Description:  complaint.Description,
-        Status:       complaint.Status,
-        Priority:     "medium",
-        CreatedAt:    complaint.CreatedAt.Format("2006-01-02T15:04:05Z"),
-        UpdatedAt:    complaint.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-    }
-
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(report)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(report)
 }
 
+// DeleteReport deletes a report
 func DeleteReport(w http.ResponseWriter, r *http.Request) {
-    vars := mux.Vars(r)
-    id := vars["id"]
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
 
-    if err := utils.DB.Delete(&models.Complaint{}, id).Error; err != nil {
-        http.Error(w, "Failed to delete report", http.StatusInternalServerError)
-        return
-    }
-
-    w.WriteHeader(http.StatusNoContent)
-} 
+	if err := utils.DB.Delete(&models.Report{}, id).Error; err != nil {
+		http.Error(w, "failed to delete report", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
